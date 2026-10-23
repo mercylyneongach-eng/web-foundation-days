@@ -126,125 +126,125 @@ Instead, SnapShare should store original photos and thumbnails in **object stora
 ## 5. Proposed Architecture Diagram
 
 ```text
-                    USERS
-                      |
-                      v
-               +--------------+
-               |     CDN      |
-               | Cached photos|
-               +--------------+
-                      |
-             Cache miss / API request
-                      |
-                      v
-               +--------------+
-               |Load Balancer |
-               +--------------+
-                      |
-             +--------+--------+
-             |        |        |
-             v        v        v
-          +------+ +------+ +------+
-          | App  | | App  | | App  |
-          |Server| |Server| |Server|
-          +------+ +------+ +------+
-             |        |        |
-             +--------+--------+
-                      |
-          +-----------+-----------+
-          |                       |
-          v                       v
-    +-------------+       +---------------+
-    |    Cache    |       |   Database    |
-    | Feed/metadata|      | Primary DB    |
-    +-------------+       +---------------+
-                                  |
-                                  v
-                          +---------------+
-                          |  Read Replica |
-                          +---------------+
+                         USERS
+                           |
+                           v
+                    +-------------+
+                    |     CDN     |
+                    | Cached photos|
+                    +-------------+
+                           |
+                           v
+                    +-------------+
+                    |Load Balancer|
+                    +-------------+
+                           |
+                +----------+----------+
+                |          |          |
+                v          v          v
+             +------+   +------+   +------+
+             | App  |   | App  |   | App  |
+             |Server|   |Server|   |Server|
+             +------+   +------+   +------+
+                |          |          |
+                +----------+----------+
+                           |
+                 +---------+---------+
+                 |                   |
+                 v                   v
+           +-----------+       +-----------+
+           |   Cache   |       |  Primary  |
+           |Feed data  |       | Database  |
+           +-----------+       +-----------+
+                                     |
+                                     v
+                               +-----------+
+                               |Read Replica|
+                               +-----------+
 
-       PHOTO UPLOAD AND THUMBNAIL PROCESSING
+              ASYNCHRONOUS PHOTO PROCESSING
 
-          App Server
-               |
-               v
-       +----------------+
-       | Object Storage |
-       | Original photo |
-       +----------------+
-               |
-               v
-       +----------------+
-       | Message Queue  |
-       | Thumbnail job  |
-       +----------------+
-               |
-               v
-       +----------------+
-       | Worker Service |
-       | Create thumbnail|
-       +----------------+
-               |
-               v
-       +----------------+
-       | Object Storage |
-       |    Thumbnail   |
-       +----------------+
-               |
-               v
-       Database metadata is updated;
-       the CDN can serve the thumbnail.
+                       App Server
+                           |
+                           v
+                    +--------------+
+                    |Object Storage|
+                    |Original Photo|
+                    +--------------+
+                           |
+                           v
+                    +--------------+
+                    | Message Queue|
+                    | Thumbnail Job|
+                    +--------------+
+                           |
+                           v
+                    +--------------+
+                    | Worker Service|
+                    |Generate Thumbnail|
+                    +--------------+
+                           |
+                           v
+                    +--------------+
+                    |Object Storage|
+                    |  Thumbnail   |
+                    +--------------+
+                           |
+                           v
+                    Database metadata
+                    updated with status
+                    and thumbnail reference
 ```
 
 ## 6. Components and the Problems They Solve
 
-1. **CDN:** Caches and delivers photos from locations close to users, reducing latency and the amount of photo traffic reaching the application servers.
-2. **Load balancer:** Distributes incoming application requests across healthy app servers to prevent any one server from becoming overloaded.
-3. **App servers:** Handle application logic, authenticate users, process uploads and retrieve feed data.
-4. **Cache:** Stores frequently requested feed data and metadata in fast memory, reducing repeated database queries.
-5. **Primary database:** Stores authoritative user, photo, follow relationship and other application metadata.
-6. **Database read replica:** Serves read queries such as feed metadata lookups, reducing read pressure on the primary database.
-7. **Object storage:** Stores original photos and generated thumbnails durably without filling the database with large binary files.
-8. **Message queue:** Holds thumbnail-generation jobs until workers can process them, helping absorb bursts of uploads and decoupling upload requests from image processing.
-9. **Worker service:** Processes queued jobs, resizes uploaded originals into thumbnails and saves the resulting files to object storage.
+1. **CDN:** Delivers cached photos from locations closer to users, reducing loading times and traffic reaching the origin servers.
+2. **Load balancer:** Distributes incoming requests across healthy application servers to prevent any single server from becoming overloaded.
+3. **App servers:** Handle user authentication, upload validation, feed requests and the application's business logic.
+4. **Cache:** Stores frequently requested feed data and metadata in fast memory to reduce database queries and improve response times.
+5. **Primary database:** Stores authoritative application metadata, including users, photo records, captions and follow relationships.
+6. **Read replica:** Handles read queries to reduce the workload on the primary database and improve feed performance.
+7. **Object storage:** Stores original photos and thumbnails durably and cost-effectively without placing large binary files inside database tables.
+8. **Message queue:** Holds thumbnail-generation jobs until workers can process them, allowing uploads to complete without waiting for image processing.
+9. **Worker service:** Processes queued jobs in the background, generates thumbnails and stores them in object storage.
 
 ## 7. Step-by-Step Photo Upload Flow
 
-1. A user selects a photo and submits it through the SnapShare application.
-2. The load balancer routes the upload request to a healthy app server.
-3. The app server authenticates the user and validates the upload, including its file type and size.
-4. The original photo is uploaded to object storage, where it receives a unique object key.
-5. The application creates a database record containing the photo ID, user ID, object key, upload time and other relevant metadata.
-6. The app server places a thumbnail-generation job on the message queue.
-7. The application confirms the upload to the user without waiting for thumbnail generation to finish.
-8. A worker retrieves the job from the queue, reads the original photo from object storage and generates a 50 KB thumbnail.
-9. The worker saves the thumbnail in object storage and updates the photo's processing status or thumbnail reference in the database.
-10. When users view their feeds, the app server retrieves the relevant feed metadata, using the cache and database read replica where appropriate.
-11. The feed provides photo URLs or object references, and the CDN delivers cached photo files or fetches uncached files from object storage.
+1. A user selects a photo and submits it to SnapShare.
+2. The load balancer routes the request to a healthy application server.
+3. The application server authenticates the user and validates the photo's file type and size.
+4. The original photo is uploaded to object storage and assigned a unique object key.
+5. The application creates a database record containing the photo ID, user ID, object key, upload time and processing status.
+6. The application places a thumbnail-generation job on the message queue.
+7. The application confirms the successful upload without waiting for the thumbnail to be generated.
+8. A background worker retrieves the job from the queue and downloads the original photo from object storage.
+9. The worker generates a 50 KB thumbnail and saves it in object storage.
+10. The worker updates the database record to indicate that the thumbnail is ready and stores its object key or reference.
+11. When another user opens a feed, the application retrieves feed metadata using the cache and read replica where appropriate.
+12. The CDN delivers the original photos or thumbnails from its cache, fetching uncached files from object storage when necessary.
 
-If thumbnail processing fails, the job should be retried safely, and the original photo should remain available. The application can temporarily display a placeholder until the thumbnail is ready.
+If thumbnail generation fails, the queue should support retries, and the worker should process jobs safely without creating duplicate results. A placeholder can be displayed while the thumbnail is unavailable.
 
-## 8. Trade-Offs
+## 8. Architectural Trade-Offs
 
-### Trade-off 1: Caching versus Freshness
+### 8.1 Caching versus Data Freshness
 
-Caching feed data and metadata improves response times and reduces database load. However, cached information may become outdated when a user uploads a new photo or changes a follow relationship. SnapShare must balance cache performance with freshness by using suitable expiration times and invalidation strategies.
+Caching reduces database load and makes feeds faster. However, cached data may become outdated after a new upload or follow relationship change. Appropriate expiration periods and cache invalidation are needed to balance speed with freshness.
 
-### Trade-off 2: Asynchronous Thumbnail Generation versus Immediate Availability
+### 8.2 Asynchronous Processing versus Immediate Availability
 
-Generating thumbnails through a queue and worker allows uploads to complete quickly and protects app servers from heavy image-processing tasks. However, thumbnails are not available immediately, and queue delays or worker failures can affect when they appear. Retry handling, monitoring and temporary placeholders help manage this delay.
+A message queue and background worker prevent image processing from blocking application requests, improving upload responsiveness and protecting application servers during traffic spikes. However, thumbnails may not be available immediately, and failed or delayed jobs require monitoring, retries and error handling.
 
-### Trade-off 3: Object Storage versus Database Simplicity
+### 8.3 Read Replicas versus Strong Consistency
 
-Object storage is better suited to large photo files and scales independently of the metadata database. However, it introduces additional components and requires the application to manage object keys, access permissions, file deletion and consistency between database records and stored files.
+Read replicas improve scalability by distributing read traffic. However, replication lag can cause a recently uploaded photo or updated record to be temporarily missing from a feed. The application may need to read recent changes from the primary database or use other consistency measures.
 
-### Trade-off 4: Read Replicas versus Strongly Consistent Reads
+### 8.4 Object Storage versus Architectural Complexity
 
-Read replicas distribute read traffic and reduce pressure on the primary database. However, replication lag can cause a newly uploaded photo or recently updated metadata to be temporarily missing from a feed. SnapShare may need to route certain recent-write reads to the primary database or implement appropriate consistency handling.
+Object storage is suitable for large photo files and can scale independently of the database. However, it introduces additional complexity because the application must manage file references, permissions, failed uploads and consistency between stored files and database records.
 
 ## 9. Conclusion
 
-SnapShare has an estimated one million daily active users, 11.57 average photo uploads per second and approximately 578.70 average feed views per second. Peak feed traffic is estimated at 2,893.52 requests per second, and new photos require approximately 748.25 TB of storage per year for originals and thumbnails.
+SnapShare is a read-heavy application with an estimated one million daily active users, 11.57 average uploads per second and 578.70 average feed views per second. At five times average traffic, feed requests could reach approximately 2,894 requests per second. Annual storage for original photos and thumbnails is estimated at 748.25 TB.
 
-The proposed architecture uses a CDN, load balancer, scalable app servers, caching, a primary database with a read replica, object storage, a message queue and thumbnail workers. This design prioritizes frequent feed reads while keeping photo storage scalable and image processing asynchronous. Actual production capacity should be validated through load testing, monitoring and measured usage patterns.
+The proposed architecture combines a CDN, load balancer, scalable application servers, caching, a primary database with a read replica, object storage, a message queue and background workers. This design supports fast feed delivery, scalable photo storage and reliable asynchronous thumbnail generation. Load testing and production monitoring would be needed to validate actual capacity requirements.
