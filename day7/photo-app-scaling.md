@@ -13,7 +13,7 @@ The following assumptions are used:
 - Average original photo size: 2 MB.
 - Each photo also has a 50 KB thumbnail.
 - One day contains 86,400 seconds.
-- Peak traffic is estimated at 5 times the average traffic.
+- Peak traffic is estimated at 5 times average traffic.
 - A year contains 365 days.
 - Storage calculations use decimal units: 1 TB = 1,000 GB.
 - Storage estimates exclude backups, replication overhead and other application data.
@@ -82,7 +82,7 @@ Annual thumbnail storage:
 
 **Total annual photo storage = 748.25 TB, or approximately 750 TB.**
 
-This represents newly uploaded photos and thumbnails retained for one year, without compression or deletion.
+This represents one year of newly uploaded photos and thumbnails retained without compression or deletion.
 
 ### Summary of Estimates
 
@@ -121,124 +121,125 @@ The database should store structured metadata such as the photo ID, owner, capti
 ## 5. Proposed Architecture Diagram
 
 ```text
-                  USERS
-                    |
-                    v
-              +-----------+
-              |    CDN    |
-              |Photo files|
-              +-----------+
-                    |
-                    v
-              +-------------+
-              |Load Balancer|
-              +-------------+
-                    |
-          +---------+---------+
-          |         |         |
-          v         v         v
-       +------+  +------+  +------+
-       | App  |  | App  |  | App  |
-       |Server|  |Server|  |Server|
-       +------+  +------+  +------+
-          |         |         |
-          +---------+---------+
-                    |
-             +------+------+
-             |             |
-             v             v
-        +---------+   +-------------+
-        |  Cache  |   | Primary DB  |
-        |Feed data|   |  Metadata   |
-        +---------+   +-------------+
-                            |
-                            v
-                      +-------------+
-                      | Read Replica|
-                      +-------------+
+                         USERS
+                           |
+                           v
+                    +-------------+
+                    |     CDN     |
+                    | Cached photos|
+                    +-------------+
+                           |
+                           v
+                    +-------------+
+                    |Load Balancer|
+                    +-------------+
+                           |
+                +----------+----------+
+                |          |          |
+                v          v          v
+             +------+   +------+   +------+
+             | App  |   | App  |   | App  |
+             |Server|   |Server|   |Server|
+             +------+   +------+   +------+
+                |          |          |
+                +----------+----------+
+                           |
+                 +---------+---------+
+                 |                   |
+                 v                   v
+           +-----------+       +-----------+
+           |   Cache   |       |  Primary  |
+           |Feed data  |       | Database  |
+           +-----------+       +-----------+
+                                     |
+                                     v
+                               +-----------+
+                               |Read Replica|
+                               +-----------+
 
-          PHOTO UPLOAD AND THUMBNAIL PROCESSING
+              ASYNCHRONOUS PHOTO PROCESSING
 
-                  App Server
-                      |
-                      v
-               +--------------+
-               |Object Storage|
-               |Original Photo|
-               +--------------+
-                      |
-                      v
-               +--------------+
-               | Message Queue|
-               |Thumbnail Job |
-               +--------------+
-                      |
-                      v
-               +--------------+
-               |Worker Service|
-               |Create Thumbnail
-               +--------------+
-                      |
-                      v
-               +--------------+
-               |Object Storage|
-               |  Thumbnail   |
-               +--------------+
-                      |
-                      v
-              Update photo metadata
-                in the database
+                       App Server
+                           |
+                           v
+                    +--------------+
+                    |Object Storage|
+                    |Original Photo|
+                    +--------------+
+                           |
+                           v
+                    +--------------+
+                    | Message Queue|
+                    | Thumbnail Job|
+                    +--------------+
+                           |
+                           v
+                    +--------------+
+                    | Worker Service|
+                    |Generate Thumbnail|
+                    +--------------+
+                           |
+                           v
+                    +--------------+
+                    |Object Storage|
+                    |  Thumbnail   |
+                    +--------------+
+                           |
+                           v
+                    Database metadata
+                    updated with status
+                    and thumbnail reference
 ```
 
 ## 6. Components and the Problems They Solve
 
-- **CDN:** Delivers cached photos from locations close to users, reducing loading times and traffic reaching the application servers.
-- **Load balancer:** Distributes incoming API requests across healthy app servers to prevent individual servers from becoming overloaded.
-- **App servers:** Handle authentication, upload validation, feed requests and application logic.
-- **Cache:** Stores frequently requested feed data and metadata in fast memory, reducing database queries and improving response times.
-- **Primary database:** Stores authoritative user information, follow relationships and photo metadata.
-- **Read replica:** Handles feed-related read queries, reducing the workload on the primary database.
-- **Object storage:** Stores original photos and thumbnails durably without filling database tables with large files.
-- **Message queue:** Holds thumbnail-generation jobs until workers can process them, separating image processing from the upload request.
-- **Worker service:** Processes queued jobs in the background, creates thumbnails and saves them to object storage.
+1. **CDN:** Delivers cached photos from locations closer to users, reducing loading times and traffic reaching the origin servers.
+2. **Load balancer:** Distributes incoming requests across healthy application servers to prevent any single server from becoming overloaded.
+3. **App servers:** Handle user authentication, upload validation, feed requests and the application's business logic.
+4. **Cache:** Stores frequently requested feed data and metadata in fast memory to reduce database queries and improve response times.
+5. **Primary database:** Stores authoritative application metadata, including users, photo records, captions and follow relationships.
+6. **Read replica:** Handles read queries to reduce the workload on the primary database and improve feed performance.
+7. **Object storage:** Stores original photos and thumbnails durably and cost-effectively without placing large binary files inside database tables.
+8. **Message queue:** Holds thumbnail-generation jobs until workers can process them, allowing uploads to complete without waiting for image processing.
+9. **Worker service:** Processes queued jobs in the background, generates thumbnails and stores them in object storage.
 
 ## 7. Step-by-Step Photo Upload Flow
 
-1. A user selects a photo and submits it through the application.
-2. The load balancer routes the request to a healthy app server.
-3. The app server authenticates the user and validates the file type and size.
+1. A user selects a photo and submits it to SnapShare.
+2. The load balancer routes the request to a healthy application server.
+3. The application server authenticates the user and validates the photo's file type and size.
 4. The original photo is uploaded to object storage and assigned a unique object key.
-5. The app server creates a database record containing the photo ID, owner, object key, upload time and processing status.
-6. The app server places a thumbnail-generation job on the message queue.
-7. Once the original photo and database record are safely stored and the job is successfully queued, the application responds with `201 Created` without waiting for thumbnail generation.
-8. A worker retrieves the job from the queue and reads the original photo from object storage.
-9. The worker generates the 50 KB thumbnail and saves it to object storage.
-10. The worker updates the database record with the thumbnail reference and marks processing as complete.
-11. The application invalidates or refreshes relevant cached feeds so followers can discover the new photo.
-12. When users scroll through their feeds, the application retrieves feed metadata using the cache and read replica where appropriate, while the CDN delivers the photo files.
+5. The application creates a database record containing the photo ID, user ID, object key, upload time and processing status.
+6. The application places a thumbnail-generation job on the message queue.
+7. Once the original photo and database record are safely stored and the job is successfully queued, the application confirms the upload without waiting for thumbnail generation to finish.
+8. A background worker retrieves the job from the queue and reads the original photo from object storage.
+9. The worker generates a 50 KB thumbnail and saves it in object storage.
+10. The worker updates the database record to indicate that the thumbnail is ready and stores its object key or reference.
+11. When another user opens a feed, the application retrieves feed metadata using the cache and read replica where appropriate.
+12. The CDN delivers the original photos or thumbnails from its cache, fetching uncached files from object storage when necessary.
 
-If thumbnail generation fails, the system should retry the job safely. A placeholder can be shown until the thumbnail is ready, and monitoring should identify jobs that continue to fail.
+If thumbnail generation fails, the queue should support retries, and the worker should process jobs safely without creating duplicate results. A placeholder can be displayed while the thumbnail is unavailable.
 
 ## 8. Architectural Trade-Offs
 
-### 1. Speed versus Freshness
+### 8.1 Caching versus Data Freshness
 
-Caching feeds reduces database load and makes scrolling faster. However, cached feeds may temporarily omit new photos or show outdated information. Cache expiration and invalidation strategies help balance speed and freshness.
+Caching reduces database load and makes feeds faster. However, cached data may become outdated after a new upload or follow relationship change. Appropriate expiration periods and cache invalidation are needed to balance speed with freshness.
 
-### 2. Fast Uploads versus Immediate Thumbnail Availability
+### 8.2 Asynchronous Processing versus Immediate Availability
 
-Background thumbnail generation lets the application respond quickly without tying up app servers with image processing. However, thumbnails may take time to appear, and queue delays or worker failures require retries and monitoring.
+A message queue and background worker prevent image processing from blocking application requests, improving upload responsiveness and protecting application servers during traffic spikes. However, thumbnails may not be available immediately, and failed or delayed jobs require monitoring, retries and error handling.
 
-### 3. Read Replicas versus Strong Consistency
+### 8.3 Read Replicas versus Strong Consistency
 
-Read replicas distribute database reads and improve scalability. However, replication lag can temporarily hide recent uploads or updates. The application may need to read recent changes from the primary database when immediate consistency is important.
+Read replicas improve scalability by distributing read traffic. However, replication lag can cause a recently uploaded photo or updated record to be temporarily missing from a feed. The application may need to read recent changes from the primary database or use other consistency measures.
 
-### 4. Object Storage versus Simplicity
+### 8.4 Object Storage versus Architectural Complexity
 
-Object storage handles large photo files efficiently and scales independently of the database. However, it introduces additional complexity in managing file references, permissions, failed uploads and consistency between database records and stored objects.
+Object storage is suitable for large photo files and can scale independently of the database. However, it introduces additional complexity because the application must manage file references, permissions, failed uploads and consistency between stored files and database records.
 
 ## 9. Conclusion
 
-SnapShare is a read-heavy application with one million daily active users, approximately 11.57 average photo uploads per second and 578.70 average feed views per second. Peak feed traffic is estimated at 2,893.52 requests per second. Original photos and thumbnails require approximately 748.25 TB of storage for one year of uploads.
+SnapShare is a read-heavy application with an estimated one million daily active users, 11.57 average uploads per second and 578.70 average feed views per second. At five times average traffic, feed requests could reach approximately 2,894 requests per second. Annual storage for original photos and thumbnails is estimated at 748.25 TB.
 
-The proposed architecture uses a CDN, load balancer, scalable app servers, cache, primary database, read replica, object storage, message queue and background worker. Separating photo files from structured database records and processing thumbnails asynchronously helps the application serve feeds efficiently while supporting reliable uploads and growing storage needs.
+The proposed architecture combines a CDN, load balancer, scalable application servers, caching, a primary database with a read replica, object storage, a message queue and background workers. This design supports fast feed delivery, scalable photo storage and reliable asynchronous thumbnail generation. Load testing and production monitoring would be needed to validate actual capacity requirements.
